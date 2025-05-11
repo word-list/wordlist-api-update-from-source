@@ -37,17 +37,14 @@ public class App implements RequestHandler<APIGatewayProxyRequestEvent, Object> 
     private final DynamoDbTable<SourceEntity> sourcesTable = dynamoDbClient.table(System.getenv("SOURCES_TABLE_NAME"),
             TableSchema.fromBean(SourceEntity.class));
     private final CognitoIdentityProviderClient cognitoClient = DependencyFactory.cognitoIdentityProviderClient();
+    private final ObjectMapper objectMapper = new ObjectMapper();
 
     @Override
     public APIGatewayProxyResponseEvent handleRequest(APIGatewayProxyRequestEvent input, Context context) {
         APIGatewayProxyResponseEvent response = new APIGatewayProxyResponseEvent();
 
         // Validate token
-        String token = input.getHeaders().get("Authorization");
-        if (token == null || !token.startsWith("Bearer ")) {
-            return response.withStatusCode(401).withBody("{\"error\": \"Unauthorized\"}");
-        }
-        token = token.substring(7)
+        String token = input.getHeaders().get("Authorization").substring(7);
         GetUserResponse getUserResponse = cognitoClient.getUser(b -> b.accessToken(token));
         if (getUserResponse.username() == null) {
             return response.withStatusCode(401).withBody("{\"error\": \"Unauthorized\"}");
@@ -65,17 +62,29 @@ public class App implements RequestHandler<APIGatewayProxyRequestEvent, Object> 
         }
 
         // Send message to queue
-        UpdateFromSourceMessage message = message.builder()
+        UpdateFromSourceMessage message = UpdateFromSourceMessage.builder()
                 .id(sourceId)
                 .force(false)
                 .build();
 
-        SendMessageResponse sendMessageResponse = sqsClient.sendMessage(b -> b.queueUrl(System.getenv("UPDATE_FROM_SOURCE_QUEUE_URL")));
+        String messageBody;
+        try {
+            messageBody = objectMapper.writeValueAsString(message);
+        } catch (Exception e) {
+            return response
+                    .withStatusCode(500)
+                    .withBody("{\"error\": \"Failed to encode message\"}");
+        }
+
+        SendMessageResponse sendMessageResponse = sqsClient
+                .sendMessage(b -> b
+                        .queueUrl(System.getenv("UPDATE_FROM_SOURCE_QUEUE_URL"))
+                        .messageBody(messageBody));
 
         if (!sendMessageResponse.sdkHttpResponse().isSuccessful()) {
             return response
-            .withStatusCode(500)
-            .withBody("{\"message\": \"Failed to request update for source " + sourceId + "\"}");
+                    .withStatusCode(500)
+                    .withBody("{\"message\": \"Failed to request update for source " + sourceId + "\"}");
         }
 
         return response
